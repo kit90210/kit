@@ -1,0 +1,413 @@
+==================================================
+Setup for:
+
+[Client] --> [OpenVPN Server on VPS] --> Internet {enable during configuration of OpenVPN service and firewall rules}
+         {or}
+[Client] --> [OpenVPN Server on VPS] 
+
+===================================================
+
+1. create 18.04 or 19.04 Ubuntu
+2. passwd
+   (change default root password) 
+3. sudo apt update
+   (update all links to packages)
+4. sudo apt upgrade
+   (upgrade all components in server)
+5. add additional static ip
+6. reboot
+
+7. configure machine to use 2nd IP
+   click on "networking configuration" to get details if Vultr
+   111.222.333.44 = first IP, 111.222.333.555 = new IP
+   999.999.999.999 = gateway, 888.888.888.888 = nameserver
+   169.254.0.0 = Automatic Private IP Addressing, or APIPA
+   a. ip address 
+      (make sure ens3 is the correct interface)
+   b. vi /etc/netplan/10-ens3.yaml
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          ens3:
+          dhcp4: no
+          addresses: [111.222.333.444/32,111.222.333.555/32]
+          gateway4: 999.999.999.999
+          nameservers:
+            addresses: [888.888.888.888]
+          routes:
+          - to: 169.254.0.0/16
+            via: 999.999.999.999
+            metric: 100
+   d. netplan try
+      (to enable this)
+
+5. sudo apt install openvpn easy-rsa
+   (install openvpn and easy-rsa for standalone CA server)
+
+//////-- create CA authority to sign certificate requests --//////
+==================================================================
+6. make-cadir ~/ovpn-ca
+7. cd ~/ovpn-ca
+8. vi vars
+   (enable and change the following values - or just uncomment will do and use defaults)
+
+set_var EASYRSA_REQ_COUNTRY    "US"
+set_var EASYRSA_REQ_PROVINCE   "California"
+set_var EASYRSA_REQ_CITY       "San Francisco"
+set_var EASYRSA_REQ_ORG        "Grunge Studios"
+set_var EASYRSA_REQ_EMAIL      "grunge22@grungestudios.com"
+set_var EASYRSA_REQ_OU         "Guitar Club"
+
+9. ./easyrsa init-pki
+10. ./easyrsa build-ca nopass
+    (Change "Easy-RSA CA" to anything without spaces, e.g. ERCA)
+
+//////-- create an EasyRSA environment to generate cert requests --//////
+=========================================================================
+11. make-cadir ~/ovpn-create-cert-req
+12. cd ~/ovpn-create-cert-req
+13. vi vars
+   (enable and change the following values - or just uncomment and use defaults)
+
+set_var EASYRSA_REQ_COUNTRY    "US"
+set_var EASYRSA_REQ_PROVINCE   "California"
+set_var EASYRSA_REQ_CITY       "San Francisco"
+set_var EASYRSA_REQ_ORG        "Grunge Studios"
+set_var EASYRSA_REQ_EMAIL      "grunge22@grungestudios.com"
+set_var EASYRSA_REQ_OU         "Guitar Club"
+
+14. ./easyrsa init-pki
+
+//////-- create server cert request and copy to CA authority to sign --//////
+=============================================================================
+15. ./easyrsa gen-req server nopass
+    (enter to accept default when prompted)
+16. cp ~/ovpn-create-cert-req/pki/reqs/server.req ~/ovpn-ca/pki/reqs/server.req
+17. cd ~/ovpn-ca
+18. ./easyrsa sign-req server server
+    (enter "yes" when prompted)
+
+//////-- copy signed server cert and key to OpenVPN to generate other OpenVPN stuff --//////
+====================================================================================
+19. cp ~/ovpn-ca/pki/ca.crt /etc/openvpn
+20. cp ~/ovpn-ca/pki/issued/server.crt /etc/openvpn
+    cp ~/ovpn-create-cert-req/pki/private/server.key /etc/openvpn
+21. cd ~/ovpn-create-cert-req
+22. ./easyrsa gen-dh
+23. openvpn --genkey --secret ta.key     <------ this changes a key inside openvpn. DO NOT RERUN IF INTEND TO USE BACK OLD CONFIG
+24. cp ~/ovpn-create-cert-req/pki/dh.pem /etc/openvpn/
+25. cp ~/ovpn-create-cert-req/ta.key /etc/openvpn/
+
+//////-- create folder to store all client configurations --//////
+=================================================================
+26. mkdir -p ~/client-configs/keys
+27. chmod -R 700 ~/client-configs
+
+//////-- copy the server certs into client-configs --///////
+============================================================
+28. cp ~/ovpn-create-cert-req/ta.key ~/client-configs/keys/
+29. cp ~/ovpn-ca/pki/ca.crt ~/client-configs/keys/
+
+//////-- create client cert request, copy to CA authority to sign, and copy cert and key to client-configs --//////
+==========================================================================================================
+30. cd ~/ovpn-create-cert-req
+31. ./easyrsa gen-req client1 nopass   <--- use this if want to gen without password.
+    (enter when prompted to accept default values)
+
+31. ./easyrsa gen-req client1         <--- use this if want to gen WITH password.
+    (enter password, and enter when prompted to accept default values)
+
+32. cp ~/ovpn-create-cert-req/pki/reqs/client1.req ~/ovpn-ca/pki/reqs/
+33. cd ~/ovpn-ca
+34. ./easyrsa sign-req client client1
+    (reply "yes")
+35. cp ~/ovpn-ca/pki/issued/client1.crt ~/client-configs/keys/
+    cp ~/ovpn-create-cert-req/pki/private/client1.key ~/client-configs/keys/
+
+//////-- revoke Client  --//////
+==========================================================================================================
+
+cd ~/ovpn-ca
+./easyrsa revoke client2
+(enter "yes" when prompted)
+./easyrsa gen-crl
+cp ~/ovpn-ca/pki/crl.pem /etc/openvpn/
+systemctl restart openvpn@server    
+
+
+//////-- configure OpenVPN service (and firewall rules) --//////
+================================================================
+36. cp /usr/share/doc/openvpn/examples/sample-config-files/server.conf.gz /etc/openvpn/
+37. gzip -d /etc/openvpn/server.conf.gz
+38. vi /etc/openvpn/server.conf
+
+multihome            <-- add if you have multiple public IPs that will connect to this server
+tls-auth ta.key 0    <--check (uncomment)
+cipher AES-256-CBC   <--check (uncomment)
+auth SHA256          <-- add 
+dh dh.pem            <--modify
+user nobody          <--uncomment
+group nogroup        <--uncomment 
+
+{enable below only if you want all client traffic to go through OpenVPN Server}
+push "redirect-gateway def1 bypass-dhcp"     <--uncomment (to redirect ALL TRAFFIC ONLY THRU VPN)
+push "dhcp-option DNS 208.67.222.222"        <--uncomment (to redirect ALL TRAFFIC ONLY THRU VPN)
+push "dhcp-option DNS 208.67.220.220"        <--uncomment (to redirect ALL TRAFFIC ONLY THRU VPN)
+
+39. vi /etc/sysctl.conf 
+
+net.ipv4.ip_forward=1  <-- uncomment
+
+40. ip route | grep default
+    (to get "default via xx.yy.zz.aa dev ens3 proto static". identify that ens3 is the default interface)
+
+41. vi /etc/ufw/before.rules
+
+#
+# rules.before
+#
+# Rules that should be run before the ufw command line added rules. Custom
+# rules should be added to one of these chains:
+#   ufw-before-input
+#   ufw-before-output
+#   ufw-before-forward
+#
+
+{insert the below chunk here.. dont copy this line, obviously. only used for if want to surf internet thru openvpn server}
+
+# START OPENVPN RULES
+# NAT table rules
+*nat
+:POSTROUTING ACCEPT [0:0] 
+# Allow traffic from OpenVPN client to ens3 (change to the interface you discovered!)
+-A POSTROUTING -s 10.8.0.0/8 -o ens3 -j MASQUERADE
+COMMIT
+# END OPENVPN RULES
+
+{insert the above chunk here.. dont copy this line, obviously}
+
+# Don't delete these required lines, otherwise there will be errors
+*filter
+...
+...
+
+42. vi /etc/default/ufw
+
+DEFAULT_FORWARD_POLICY="ACCEPT"      <--modify
+
+43. ufw allow 1194/udp
+    ufw allow OpenSSH
+    ufw disable
+    ufw enable
+
+//////-- Start and Enable OpenVPN Service --//////
+==================================================
+
+44. systemctl start openvpn@server
+    systemctl status openvpn@server
+    systemctl stop openvpn@server    <-- if need
+
+    tail /var/log/syslog -n 20    <-- if need to check errors
+
+
+45. ip addr show tun0
+    (should show something similar to below)
+
+	4: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1500 qdisc noqueue state UNKNOWN group default qlen 100
+    		link/none 
+    		inet 10.8.0.1 peer 10.8.0.2/32 scope global tun0
+       		valid_lft forever preferred_lft forever
+
+46. systemctl enable openvpn@server
+
+////-- Create and configure Client connection fields --///////
+=============================================================
+
+47. mkdir -p ~/client-configs/files
+
+48. cp /usr/share/doc/openvpn/examples/sample-config-files/client.conf ~/client-configs/base.conf
+
+49. vi ~/client-configs/base.conf
+
+remote aaa.bbb.ccc.ddd 1194
+proto udp
+user nobody
+group nogroup
+#ca ca.crt
+#cert client.crt
+#key client.key
+#tls-auth ta.key 1
+cipher AES-256-CBC
+auth SHA256
+key-direction 1
+
+50. vi ~/client-configs/make_config.sh
+
+#!/bin/bash
+
+# First argument: Client identifier
+
+KEY_DIR=~/client-configs/keys
+OUTPUT_DIR=~/client-configs/files
+BASE_CONFIG=~/client-configs/base.conf
+
+cat ${BASE_CONFIG} \
+    <(echo -e '<ca>') \
+    ${KEY_DIR}/ca.crt \
+    <(echo -e '</ca>\n<cert>') \
+    ${KEY_DIR}/${1}.crt \
+    <(echo -e '</cert>\n<key>') \
+    ${KEY_DIR}/${1}.key \
+    <(echo -e '</key>\n<tls-auth>') \
+    ${KEY_DIR}/ta.key \
+    <(echo -e '</tls-auth>') \
+    > ${OUTPUT_DIR}/${1}.ovpn
+
+51. chmod 700 ~/client-configs/make_config.sh
+
+52. cd ~/client-configs
+    ./make_config.sh client1
+
+    {copy the *.ovpn files from ~/client-configs/files/ to the desktop)
+
+====================================
+CONTROLLING ACCESS USING TLS-VERIFY
+===================================
+a. Add into /etc/openvpn/server.conf:
+
+	tls-verify "/etc/openvpn/verify-cn /etc/openvpn/allowed_clients"
+
+b. Create file /etc/openvpn/allowed_clients:
+
+	CN=s1client
+	CN=s2client
+	#CN=x1client
+	# use hex to denote disabled clients
+	
+NOTE: CANNOT ADD #xxx behind the list of CNs 
+E.G.>>
+	CN=s1client #for mr.A
+	CN=s2client #for mr.B
+	#CN=x1client
+
+***ABOVE WILL NOT WORK***
+
+c. Create verify-cn
+
+	#!/bin/sh
+	[ $# -eq 3 ] || { echo usage: ovpnCNcheck.sh userfile certificate_depth X509_NAME_oneline ; exit 255 ; }
+	# $2 -> certificate_depth
+	if [ $2 -eq 0 ] ; then
+	    # $3 -> X509_NAME_oneline
+	    # $1 -> cn we are looking for
+	    echo "[$0] [$1] [$2] [$3] [$4]"
+	    while IFS="" read -r p || [ -n "$p" ]
+	    do
+		printf '%s\n' "$p"
+		if [ $3 = $p ]
+		then 
+		    exit 0  
+		fi
+	    done < $1
+	    exit 1
+	fi
+	exit 0
+	
+d. chmod +x verify-cn
+
+e. systemctl restart openvpn@server
+
+
+=========================================================================================
+=========================================================================================
+
+////// -- Installing JITSI (domainless, behind openvpn) -- //////
+================================================================
+
+53. Setup swap file (example is for 2G ram =2048)
+
+sudo dd if=/dev/zero of=/swapfile count=2048 bs=1M
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile   none    swap    sw    0   0' | sudo tee -a /etc/fstab
+free -m
+
+54. (edited to suit using *.local as doman. 127.xxx must remain)
+
+sudo hostnamectl set-hostname pecanpie
+sudo sed -i 's/^127.0.1.1.*$/127.0.1.1 pecanpie.local pecanpie/g' /etc/hosts
+
+{check}
+hostname
+hostname -f
+
+55. Setup firewall {only do this if this isn't behind openvpn.}
+
+{if for normal domain open internet}
+sudo ufw allow OpenSSH
+sudo ufw allow http
+sudo ufw allow https
+sudo ufw allow in 10000:20000/udp
+sudo ufw enable
+
+{if for openvpn internal users}
+ufw allow in from 10.8.0.0/24
+ufw allow out from 10.8.0.0/24
+
+
+56. 
+
+sudo apt install -y openjdk-8-jre-headless
+java -version
+echo "JAVA_HOME=$(readlink -f /usr/bin/java | sed "s:bin/java::")" | sudo tee -a /etc/profile
+source /etc/profile
+
+57.
+
+sudo apt install -y nginx
+sudo systemctl start nginx.service
+sudo systemctl enable nginx.service
+
+58. 
+
+cd
+wget -qO - https://download.jitsi.org/jitsi-key.gpg.key | sudo apt-key add -
+sudo sh -c "echo 'deb https://download.jitsi.org stable/' > /etc/apt/sources.list.d/jitsi-stable.list"
+sudo apt update -y
+sudo apt install -y jitsi-meet
+(enter "10.8.0.1")
+(generate self signed cert)
+
+59.
+
+UNINSTALL
+
+apt-get purge jigasi jitsi-meet jitsi-meet-web-config jitsi-meet-prosody jitsi-meet-turnserver jitsi-meet-web jicofo jitsi-videobridge2
+
+LOGS
+
+/var/log/jitsi/jvb.log
+/var/log/jitsi/jicofo.log
+/var/log/prosody/prosody.log
+
+
+
+
+
+
+
+
+
+
+
+=============
+FINALLY
+=============
+
+1. Download the ovpn connections
+2. edit the ovpn connections' external ip address
+3. pass to people
+4. people connec with openvpn
+5. people go to https://10.8.0.1 to access Jitsi
